@@ -21,24 +21,28 @@ jobs:
         # 添加多架构支持
         sudo dpkg --add-architecture armhf
         
-        # 使用 Debian 源替代 Ubuntu 源（Debian 有完整的 armhf 支持）
+        # 清理现有源配置
+        sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
+        
+        # 为 amd64 主机设置源 (仅主机依赖)
         echo "deb [arch=amd64] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list
         echo "deb [arch=amd64] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list
         echo "deb [arch=amd64] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list
+        
+        # 为 armhf 交叉编译设置专用源
         echo "deb [arch=armhf] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list.d/armhf.list
         echo "deb [arch=armhf] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list.d/armhf.list
         echo "deb [arch=armhf] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list.d/armhf.list
         
-        # 安装 Debian 密钥
+        # 安装 Debian 密钥环
         sudo apt-get update
         sudo apt-get install -y debian-archive-keyring
         
-        # 添加缺失的 GPG 密钥
-        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys \
-          0E98404D386FA1D9 \
-          6ED0E7B82643E131 \
-          54404762BBB6E853 \
-          BDE6D2B9216EC7A8
+        # 添加所有必要的 GPG 密钥
+        for KEY in 0E98404D386FA1D9 6ED0E7B82643E131 F8D2585B8783D481 54404762BBB6E853 BDE6D2B9216EC7A8; do
+          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys "$KEY" || \
+          sudo apt-key adv --keyserver hkp://pgp.mit.edu:80 --recv-keys "$KEY"
+        done
         
         # 更新软件源
         sudo apt-get update
@@ -90,18 +94,13 @@ jobs:
     - name: Compile driver
       working-directory: cndrvcups-lb
       run: |
-        # 智能并行编译
-        make -j$(($(nproc) > 4 ? 4 : $(nproc)))
-        
-        # 验证编译结果
-        if ! file cndrvcups-* | grep -q "ARM"; then
-          echo "❌ 编译结果不是ARM架构"
-          exit 1
-        fi
+        # 编译并验证
+        make -j$(nproc)
+        file cndrvcups-* | grep "ARM"
         
     - name: Package artifacts
       run: |
-        # 创建输出目录结构
+        # 创建输出目录
         mkdir -p output/{DEBIAN,usr/lib,etc/udev/rules.d}
         
         # 安装到临时目录
