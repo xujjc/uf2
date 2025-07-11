@@ -8,6 +8,10 @@ on:
 jobs:
   cross-compile:
     runs-on: ubuntu-22.04
+    env:
+      ARCH: armhf
+      HOST_TRIPLET: arm-linux-gnueabihf
+      DEBIAN_SUITE: bookworm
     
     steps:
     - name: Checkout source
@@ -15,129 +19,126 @@ jobs:
       with:
         repository: random3231/cndrvcups-lb
         path: cndrvcups-lb
-        
+
     - name: Setup cross-compilation environment
       run: |
-        # 添加多架构支持
-        sudo dpkg --add-architecture armhf
+        # 安全添加多架构支持
+        sudo dpkg --add-architecture $ARCH
         
-        # 清理现有源配置
-        sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
+        # 使用官方源避免清空配置
+        sudo tee /etc/apt/sources.list << EOF
+        deb http://deb.debian.org/debian $DEBIAN_SUITE main
+        deb http://deb.debian.org/debian $DEBIAN_SUITE-updates main
+        deb http://security.debian.org/debian-security $DEBIAN_SUITE-security main
+        EOF
         
-        # 为 amd64 主机设置源 (仅主机依赖)
-        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list
-        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list
-        echo "deb [arch=amd64] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list
+        # 添加ARM架构源
+        sudo tee /etc/apt/sources.list.d/$ARCH.list << EOF
+        deb [arch=$ARCH] http://deb.debian.org/debian $DEBIAN_SUITE main
+        deb [arch=$ARCH] http://deb.debian.org/debian $DEBIAN_SUITE-updates main
+        deb [arch=$ARCH] http://security.debian.org/debian-security $DEBIAN_SUITE-security main
+        EOF
         
-        # 为 armhf 交叉编译设置专用源
-        echo "deb [arch=armhf] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list.d/armhf.list
-        echo "deb [arch=armhf] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-        echo "deb [arch=armhf] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-        
-        # 安装 Debian 密钥环
+        # 更新源并安装工具链
         sudo apt-get update
-        sudo apt-get install -y debian-archive-keyring
-        
-        # 添加所有必要的 GPG 密钥
-        for KEY in 0E98404D386FA1D9 6ED0E7B82643E131 F8D2585B8783D481 54404762BBB6E853 BDE6D2B9216EC7A8; do
-          sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys "$KEY" || \
-          sudo apt-key adv --keyserver hkp://pgp.mit.edu:80 --recv-keys "$KEY"
-        done
-        
-        # 更新软件源
-        sudo apt-get update
-        
-        # 安装交叉编译工具链
         sudo apt-get install -y \
-          crossbuild-essential-armhf \
-          binutils-arm-linux-gnueabihf \
-          gcc-arm-linux-gnueabihf \
-          g++-arm-linux-gnueabihf
-        
-        # 安装 ARMHF 依赖库
+          crossbuild-essential-$ARCH \
+          binutils-$HOST_TRIPLET \
+          gcc-$HOST_TRIPLET \
+          g++-$HOST_TRIPLET \
+          pkg-config-$HOST_TRIPLET \
+          ccache
+
+        # 安装ARMHF编译依赖
         sudo apt-get install -y \
-          libcups2-dev:armhf \
-          libxml2-dev:armhf \
-          libglib2.0-dev:armhf \
-          libtiff-dev:armhf \
-          libpng-dev:armhf \
-          libjpeg-dev:armhf \
-          libusb-1.0-0-dev:armhf
-        
+          libcups2-dev:$ARCH \
+          libxml2-dev:$ARCH \
+          libglib2.0-dev:$ARCH \
+          libtiff-dev:$ARCH \
+          libpng-dev:$ARCH \
+          libjpeg-dev:$ARCH \
+          libusb-1.0-0-dev:$ARCH
+
     - name: Configure build
       working-directory: cndrvcups-lb
       env:
-        CC: arm-linux-gnueabihf-gcc
-        CXX: arm-linux-gnueabihf-g++
-        AR: arm-linux-gnueabihf-ar
-        RANLIB: arm-linux-gnueabihf-ranlib
-        CFLAGS: "-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard"
-        CXXFLAGS: "-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard"
-        LDFLAGS: "-Wl,--no-as-needed"
+        CC: ccache $HOST_TRIPLET-gcc
+        CXX: ccache $HOST_TRIPLET-g++
+        AR: $HOST_TRIPLET-ar
+        RANLIB: $HOST_TRIPLET-ranlib
+        PKG_CONFIG_PATH: /usr/lib/$HOST_TRIPLET/pkgconfig
+        CFLAGS: "-O2 -march=armv7-a -mtune=cortex-a72 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+        CXXFLAGS: "-O2 -march=armv7-a -mtune=cortex-a72 -mfpu=neon-vfpv4 -mfloat-abi=hard"
       run: |
-        # 自动生成配置脚本
-        if [ -f autogen.sh ]; then
-          ./autogen.sh
-        elif [ -f configure.ac ]; then
-          autoreconf -vif
-        fi
+        # 自动生成配置
+        [[ -f autogen.sh ]] && NOCONFIGURE=1 ./autogen.sh || autoreconf -fiv
         
-        # 配置编译选项
+        # 配置编译选项（使用更安全的路径参数）
         ./configure \
-          --host=arm-linux-gnueabihf \
+          --host=$HOST_TRIPLET \
           --prefix=/usr \
-          --libdir=/usr/lib/arm-linux-gnueabihf \
-          --enable-progpath=/usr/bin \
-          --disable-static \
-          --enable-shared
-        
+          --libdir=/usr/lib/$HOST_TRIPLET \
+          --sysconfdir=/etc \
+          --with-cupsfilterdir=/usr/lib/cups/filter \
+          --with-cupsppddir=/usr/share/cups/model \
+          --disable-static
+
     - name: Compile driver
       working-directory: cndrvcups-lb
       run: |
-        # 编译并验证
-        make -j$(nproc)
-        file cndrvcups-* | grep "ARM"
+        # 使用ccache加速编译
+        ccache -M 1G
+        ccache -s
         
-    - name: Package artifacts
+        # 并行编译并验证
+        make -j$(($(nproc)*2))
+        find . -executable -type f -exec file {} + | grep "ARM"
+
+    - name: Create debian package
       run: |
-        # 创建输出目录
-        mkdir -p output/{DEBIAN,usr/lib,etc/udev/rules.d}
+        PKG_DIR=canon-driver-armhf
+        mkdir -p $PKG_DIR/{DEBIAN,usr/lib/cups/filter,usr/share/cups/model,etc/udev/rules.d}
         
-        # 安装到临时目录
+        # 安装到打包目录
         cd cndrvcups-lb
-        make install DESTDIR=$(pwd)/../output
+        make install DESTDIR=../$PKG_DIR
         
-        # 添加控制文件
-        cat << 'EOF' > ../output/DEBIAN/control
+        # 自动生成依赖列表
+        cd ..
+        dpkg-shlibdeps -O $PKG_DIR/usr/lib/$HOST_TRIPLET/*.so | \
+          awk -F= '{print "Depends: " $2}' > $PKG_DIR/DEBIAN/dependencies
+        
+        # 创建控制文件
+        cat > $PKG_DIR/DEBIAN/control << EOF
         Package: cndrvcups-lb
-        Version: 1.0-$(date +%Y%m%d)
+        Version: 1.0-$(date +%Y%m%d%H%M)
         Architecture: armhf
         Maintainer: GitHub Actions
         Description: Canon Printer Driver for ARMv7
-        Depends: libcups2, libxml2, libglib2.0-0, libtiff5, libpng16-16, libjpeg62-turbo, libusb-1.0-0
+        $(cat $PKG_DIR/DEBIAN/dependencies)
         EOF
         
         # 添加udev规则
-        echo 'ATTRS{idVendor}=="04a9", MODE="0666", GROUP="lp"' > ../output/etc/udev/rules.d/80-canon.rules
+        echo 'ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="04a9", MODE="0664", GROUP="lp"' > $PKG_DIR/etc/udev/rules.d/85-canon-printer.rules
         
         # 创建安装后脚本
-        cat << 'EOF' > ../output/DEBIAN/postinst
-        #!/bin/bash
+        cat > $PKG_DIR/DEBIAN/postinst << EOF
+        #!/bin/sh
         set -e
-        [ "$1" = "configure" ] || exit 0
-        ldconfig
-        udevadm control --reload-rules
-        udevadm trigger
-        systemctl restart cups
+        [ "\$1" = "configure" ] || exit 0
+        /bin/systemctl daemon-reload
+        /bin/systemctl restart cups.service
         EOF
-        chmod 755 ../output/DEBIAN/postinst
+        chmod 755 $PKG_DIR/DEBIAN/postinst
         
         # 构建DEB包
-        cd ../output
-        dpkg-deb --build . ../canon-driver-armhf.deb
-        
+        dpkg-deb -Zxz -z9 --build $PKG_DIR
+        mv $PKG_DIR.deb canon-driver-armhf.deb
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: canon-driver-armhf
-        path: canon-driver-armhf.deb
+        path: |
+          canon-driver-armhf.deb
+          cndrvcups-lb/config.log  # 包含调试信息
