@@ -1,97 +1,157 @@
-name: Compile ARMHF Driver for Canon MF4452
+name: Build Canon ARMHF Driver
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [main, master]
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
-
+  cross-compile:
+    runs-on: ubuntu-latest
+    
     steps:
-    - name: Checkout with Submodules
+    - name: Checkout source
       uses: actions/checkout@v4
       with:
-        submodules: recursive  # 递归克隆所有子模块
-        fetch-depth: 0         # 需要完整历史记录
-
-    - name: Debug Directory Structure
+        repository: random3231/cndrvcups-lb
+        path: cndrvcups-lb
+        
+    - name: Setup Debian-based cross-compilation
       run: |
-        echo "Workspace path: $GITHUB_WORKSPACE"
-        ls -R $GITHUB_WORKSPACE
-
-    - name: Install Dependencies
-      run: |
+        # 添加 Debian 源作为替代方案
+        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list
+        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list
+        echo "deb [arch=amd64] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list
+        
+        # 添加 ARMHF 架构支持
         sudo dpkg --add-architecture armhf
-        sudo apt update
-        sudo apt install -y \
-          build-essential autoconf libtool pkg-config \
-          libcups2-dev:armhf libusb-1.0-0-dev:armhf libxml2-dev:armhf \
-          libjpeg-dev:armhf libtiff-dev:armhf git cmake \
-          crossbuild-essential-armhf qemu-user-static \
-          binfmt-support devscripts fakeroot
-
-    - name: Setup Cross-Compilation
+        
+        # 安装必要的工具
+        sudo apt-get update
+        sudo apt-get install -y apt-transport-https ca-certificates
+        
+        # 添加 Debian 的 GPG 密钥
+        sudo apt-get install -y debian-archive-keyring
+        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
+        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6ED0E7B82643E131
+        
+        # 更新并安装交叉编译工具
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-arm-linux-gnueabihf \
+          g++-arm-linux-gnueabihf \
+          build-essential \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config
+        
+        # 安装 ARMHF 依赖库
+        sudo apt-get install -y \
+          libcups2-dev:armhf \
+          libxml2-dev:armhf \
+          libglib2.0-dev:armhf \
+          libtiff-dev:armhf \
+          libpng-dev:armhf \
+          libjpeg-dev:armhf
+        
+    - name: Configure build
+      working-directory: cndrvcups-lb
+      env:
+        CC: arm-linux-gnueabihf-gcc
+        CXX: arm-linux-gnueabihf-g++
+        AR: arm-linux-gnueabihf-ar
+        RANLIB: arm-linux-gnueabihf-ranlib
+        CFLAGS: "-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard"
+        CXXFLAGS: "-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard"
+        LDFLAGS: "-Wl,--no-as-needed"
       run: |
-        # 设置交叉编译环境变量
-        echo "CC=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
-        echo "CXX=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
-        echo "CFLAGS=-march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard --sysroot=/usr/arm-linux-gnueabihf" >> $GITHUB_ENV
-        echo "CXXFLAGS=$CFLAGS" >> $GITHUB_ENV
-        echo "LDFLAGS=--sysroot=/usr/arm-linux-gnueabihf" >> $GITHUB_ENV
-        echo "PKG_CONFIG_PATH=/usr/arm-linux-gnueabihf/lib/arm-linux-gnueabihf/pkgconfig" >> $GITHUB_ENV
-
-    - name: Build Dependency Library
-      run: |
-        # 构建子模块依赖
-        cd $GITHUB_WORKSPACE/libs/cnacom
-        make clean
-        make ARCH=armhf CC=${{ env.CC }} CXX=${{ env.CXX }} CFLAGS="${{ env.CFLAGS }}"
-
-        # 创建本地sysroot目录
-        mkdir -p $GITHUB_WORKSPACE/sysroot/usr/lib/arm-linux-gnueabihf
-        cp libcnacbcom.so $GITHUB_WORKSPACE/sysroot/usr/lib/arm-linux-gnueabihf/
-
-    - name: Configure Project
-      run: |
-        # 配置项目
-        cd $GITHUB_WORKSPACE
-        ./autogen.sh
+        # 生成配置脚本
+        if [ -f autogen.sh ]; then
+          ./autogen.sh
+        else
+          autoreconf -vif
+        fi
+        
+        # 配置编译选项
         ./configure \
-          --prefix=/usr \
           --host=arm-linux-gnueabihf \
-          --with-sysroot=/usr/arm-linux-gnueabihf \
-          CC=${{ env.CC }} \
-          CXX=${{ env.CXX }} \
-          CFLAGS="${{ env.CFLAGS }}" \
-          CXXFLAGS="${{ env.CXXFLAGS }}" \
-          LDFLAGS="${{ env.LDFLAGS }}"
-
-    - name: Compile Driver
+          --prefix=/usr \
+          --libdir=/usr/lib/arm-linux-gnueabihf \
+          --enable-progpath=/usr/bin \
+          --disable-static
+        
+    - name: Compile driver
+      working-directory: cndrvcups-lb
       run: |
-        # 设置动态库路径并编译
-        export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/sysroot/usr/lib/arm-linux-gnueabihf:$LD_LIBRARY_PATH
+        # 并行编译
         make -j$(nproc)
-
-    - name: Package Artifacts
+        
+        # 创建安装目录
+        mkdir -p ../output/usr
+        make install DESTDIR=$(pwd)/../output
+        
+    - name: Prepare installation package
       run: |
-        # 打包构件
-        mkdir -p ./artifacts
-        find src/ -name "*.so" -exec cp --parents {} ./artifacts/ \;
-        cp cndrvcups-lb.ppd ./artifacts/ || echo "PPD file not found"
-
-    - name: Upload Artifacts
+        cd output
+        
+        # 添加USB规则
+        mkdir -p etc/udev/rules.d
+        echo 'ATTRS{idVendor}=="04a9", MODE="0666", GROUP="lp"' > etc/udev/rules.d/80-canon.rules
+        
+        # 添加安装脚本
+        cat << 'EOF' > install.sh
+        #!/bin/bash
+        set -e
+        
+        # 检查是否以root运行
+        if [ "$(id -u)" -ne 0 ]; then
+          echo "请使用sudo运行此脚本"
+          exit 1
+        fi
+        
+        # 复制文件到系统
+        echo "安装驱动文件..."
+        [ -d etc ] && cp -r etc/* /etc/
+        [ -d usr ] && cp -r usr/* /usr/
+        
+        # 更新库缓存
+        echo "更新系统配置..."
+        ldconfig
+        
+        # 重载USB规则
+        echo "配置USB设备权限..."
+        udevadm control --reload-rules
+        udevadm trigger
+        
+        # 添加用户到打印组
+        echo "配置用户权限..."
+        if [ -n "$SUDO_USER" ]; then
+          if ! id -nG "$SUDO_USER" | grep -qw "lpadmin"; then
+            usermod -a -G lpadmin "$SUDO_USER"
+            echo "已将用户 $SUDO_USER 添加到 lpadmin 组"
+          fi
+        else
+          echo "警告：无法确定当前用户，请手动添加到lpadmin组"
+        fi
+        
+        # 重启打印服务
+        echo "重启打印服务..."
+        systemctl restart cups || true
+        
+        echo "========================================"
+        echo "佳能驱动安装成功！"
+        echo "请访问 http://localhost:631 添加打印机"
+        echo "========================================"
+        EOF
+        
+        chmod +x install.sh
+        
+        # 创建压缩包
+        tar czvf ../canon-driver-armhf.tar.gz .
+        
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: armhf-driver
-        path: ./artifacts/*
-
-    # 可选：私有子模块处理（需要配置secrets.SUBMODULE_SSH_KEY）
-    # - name: Checkout Private Submodule
-    #   uses: actions/checkout@v4
-    #   with:
-    #     repository: your-org/private-submodule
-    #     path: libs/private-submodule
-    #     ssh-key: ${{ secrets.SUBMODULE_SSH_KEY }}
+        name: canon-driver-armhf
+        path: canon-driver-armhf.tar.gz
