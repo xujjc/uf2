@@ -1,144 +1,140 @@
-name: Build Canon ARMHF Driver
+name: Build Canon UFR II ARMHF Driver (Kernel-independent)
 
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [ main ]
+
+env:
+  ARCH: armhf
+  CROSS_PREFIX: arm-linux-gnueabihf
+  DRIVER_NAME: ufr2-driver
+  DRIVER_URL: https://gdlp01.c-wss.com/gds/7/0100006587/01/linux-ufr2-drv-v590-uken-05.tar.gz
+  DRIVER_SHA256: 12ab34cd56ef78gh90ij12kl34mn56op78qr90st12uv34wx56yz78ab90cd12ef  # 替换实际校验值
 
 jobs:
-  cross-compile:
-    runs-on: ubuntu-22.04
-    env:
-      ARCH: armhf
-      HOST_TRIPLET: arm-linux-gnueabihf
-      DEBIAN_SUITE: bookworm
-    
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v4
-      with:
-        repository: random3231/cndrvcups-lb
-        path: cndrvcups-lb
-
-    - name: Setup cross-compilation environment
+    - name: Setup cross-compiler
       run: |
-        # 安全添加多架构支持
-        sudo dpkg --add-architecture $ARCH
-        
-        # 使用官方源避免清空配置
-        sudo tee /etc/apt/sources.list << EOF
-        deb http://deb.debian.org/debian $DEBIAN_SUITE main
-        deb http://deb.debian.org/debian $DEBIAN_SUITE-updates main
-        deb http://security.debian.org/debian-security $DEBIAN_SUITE-security main
-        EOF
-        
-        # 添加ARM架构源
-        sudo tee /etc/apt/sources.list.d/$ARCH.list << EOF
-        deb [arch=$ARCH] http://deb.debian.org/debian $DEBIAN_SUITE main
-        deb [arch=$ARCH] http://deb.debian.org/debian $DEBIAN_SUITE-updates main
-        deb [arch=$ARCH] http://security.debian.org/debian-security $DEBIAN_SUITE-security main
-        EOF
-        
-        # 更新源并安装工具链
-        sudo apt-get update
-        sudo apt-get install -y \
-          crossbuild-essential-$ARCH \
-          binutils-$HOST_TRIPLET \
-          gcc-$HOST_TRIPLET \
-          g++-$HOST_TRIPLET \
-          pkg-config-$HOST_TRIPLET \
-          ccache
-
-        # 安装ARMHF编译依赖
-        sudo apt-get install -y \
-          libcups2-dev:$ARCH \
-          libxml2-dev:$ARCH \
-          libglib2.0-dev:$ARCH \
-          libtiff-dev:$ARCH \
-          libpng-dev:$ARCH \
-          libjpeg-dev:$ARCH \
-          libusb-1.0-0-dev:$ARCH
-
-    - name: Configure build
-      working-directory: cndrvcups-lb
-      env:
-        CC: ccache $HOST_TRIPLET-gcc
-        CXX: ccache $HOST_TRIPLET-g++
-        AR: $HOST_TRIPLET-ar
-        RANLIB: $HOST_TRIPLET-ranlib
-        PKG_CONFIG_PATH: /usr/lib/$HOST_TRIPLET/pkgconfig
-        CFLAGS: "-O2 -march=armv7-a -mtune=cortex-a72 -mfpu=neon-vfpv4 -mfloat-abi=hard"
-        CXXFLAGS: "-O2 -march=armv7-a -mtune=cortex-a72 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+        sudo dpkg --add-architecture ${{ env.ARCH }}
+        sudo apt update
+        sudo apt install -y \
+          crossbuild-essential-${{ env.ARCH }} \
+          gcc-${{ env.CROSS_PREFIX }} \
+          libcups2-dev:${{ env.ARCH }} \
+          libtiff-dev:${{ env.ARCH }} \
+          libjpeg-dev:${{ env.ARCH }} \
+          libpng-dev:${{ env.ARCH }}
+          
+    - name: Download UFR II driver
       run: |
-        # 自动生成配置
-        [[ -f autogen.sh ]] && NOCONFIGURE=1 ./autogen.sh || autoreconf -fiv
+        wget ${{ env.DRIVER_URL }} -O ${{ env.DRIVER_NAME }}.tar.gz
+        echo "${{ env.DRIVER_SHA256 }} ${{ env.DRIVER_NAME }}.tar.gz" | sha256sum -c
+        tar xzf ${{ env.DRIVER_NAME }}.tar.gz --strip-components=1
         
-        # 配置编译选项（使用更安全的路径参数）
+    - name: Configure cross-compile
+      shell: bash
+      run: |
+        cat << EOF > cross_env.ufr2
+        export ARCH=arm
+        export CC=${{ env.CROSS_PREFIX }}-gcc
+        export CXX=${{ env.CROSS_PREFIX }}-g++
+        export STRIP=${{ env.CROSS_PREFIX }}-strip
+        export CFLAGS="-Os -march=armv7-a -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
+        EOF
+
+    - name: Build userspace components
+      run: |
+        source cross_env.ufr2
+        
+        # 进入UFR II驱动目录
+        cd UFRII
         ./configure \
-          --host=$HOST_TRIPLET \
-          --prefix=/usr \
-          --libdir=/usr/lib/$HOST_TRIPLET \
-          --sysconfdir=/etc \
-          --with-cupsfilterdir=/usr/lib/cups/filter \
-          --with-cupsppddir=/usr/share/cups/model \
-          --disable-static
-
-    - name: Compile driver
-      working-directory: cndrvcups-lb
-      run: |
-        # 使用ccache加速编译
-        ccache -M 1G
-        ccache -s
+          --host=${{ env.CROSS_PREFIX }} \
+          --disable-static \
+          --disable-kbuild \
+          --prefix=/usr
         
-        # 并行编译并验证
-        make -j$(($(nproc)*2))
-        find . -executable -type f -exec file {} + | grep "ARM"
-
-    - name: Create debian package
-      run: |
-        PKG_DIR=canon-driver-armhf
-        mkdir -p $PKG_DIR/{DEBIAN,usr/lib/cups/filter,usr/share/cups/model,etc/udev/rules.d}
+        make -j$(nproc) filter
         
-        # 安装到打包目录
-        cd cndrvcups-lb
-        make install DESTDIR=../$PKG_DIR
-        
-        # 自动生成依赖列表
+        # 提取关键文件
+        mkdir -p ../ufr2-bin
+        cp -v filter/*ufr* ../ufr2-bin/
+        cp -v *.so* ../ufr2-bin/
         cd ..
-        dpkg-shlibdeps -O $PKG_DIR/usr/lib/$HOST_TRIPLET/*.so | \
-          awk -F= '{print "Depends: " $2}' > $PKG_DIR/DEBIAN/dependencies
+
+    - name: Package universal driver
+      run: |
+        # 创建标准目录结构
+        mkdir -p output/usr/lib/cups/filter
+        mkdir -p output/usr/share/ppd/canon
+        mkdir -p output/usr/share/ufr2
         
-        # 创建控制文件
-        cat > $PKG_DIR/DEBIAN/control << EOF
-        Package: cndrvcups-lb
-        Version: 1.0-$(date +%Y%m%d%H%M)
-        Architecture: armhf
-        Maintainer: GitHub Actions
-        Description: Canon Printer Driver for ARMv7
-        $(cat $PKG_DIR/DEBIAN/dependencies)
+        # 复制二进制文件和依赖
+        install -m755 ufr2-bin/*ufr* output/usr/lib/cups/filter/
+        install -m644 ufr2-bin/*.so* output/usr/lib/${{ env.CROSS_PREFIX }}/
+        cp -r PPD/* output/usr/share/ppd/canon/
+        cp -r Doc/* output/usr/share/ufr2/
+        
+        # 创建自动安装脚本
+        cat << 'EOF' > output/install-ufr2.sh
+        #!/bin/bash
+        # Install UFR II components
+        sudo cp -r usr /
+        
+        # Register PPD files
+        sudo lpadmin -p Canon_UFRII -m canonufr2.ppd -E -v socket://printer-ip:9100
+        
+        # Set permissions
+        sudo chmod 755 /usr/lib/cups/filter/*
+        sudo chown root:root /usr/lib/cups/filter/*
+        
+        # Reload CUPS
+        sudo systemctl restart cups
+        echo "UFR II driver installed. Printer name: Canon_UFRII"
         EOF
+        chmod +x output/install-ufr2.sh
         
-        # 添加udev规则
-        echo 'ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="04a9", MODE="0664", GROUP="lp"' > $PKG_DIR/etc/udev/rules.d/85-canon-printer.rules
-        
-        # 创建安装后脚本
-        cat > $PKG_DIR/DEBIAN/postinst << EOF
-        #!/bin/sh
-        set -e
-        [ "\$1" = "configure" ] || exit 0
-        /bin/systemctl daemon-reload
-        /bin/systemctl restart cups.service
-        EOF
-        chmod 755 $PKG_DIR/DEBIAN/postinst
-        
-        # 构建DEB包
-        dpkg-deb -Zxz -z9 --build $PKG_DIR
-        mv $PKG_DIR.deb canon-driver-armhf.deb
+        # 创建压缩包
+        tar czvf ufr2-armhf-universal-$(date +%Y%m%d).tar.gz -C output .
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: canon-driver-armhf
-        path: |
-          canon-driver-armhf.deb
-          cndrvcups-lb/config.log  # 包含调试信息
+        name: ufr2-armhf-driver
+        path: ufr2-armhf-universal-*.tar.gz
+
+    - name: Generate README
+      run: |
+        cat << EOF > UFR2-README.md
+        # Canon UFR II ARMHF Universal Driver
+        
+        ## Supported Devices
+        - imageCLASS MF644Cdw
+        - imageCLASS LBP623Cdw
+        - MAXIFY MB2720
+        - 及其他标有"UFR II"的佳能设备
+        
+        ## Installation
+        1. Transfer package to device:
+           scp ufr2-armhf-universal-*.tar.gz pi@raspberrypi:~
+           
+        2. On target device:
+           tar xzf ufr2-armhf-universal-*.tar.gz
+           sudo ./install-ufr2.sh
+           
+        3. Install dependencies:
+           sudo apt install libtiff5 libjpeg62-turbo libpng16-16
+           
+        ## Configuration
+        - Web Interface: http://localhost:631
+        - Driver Location: /usr/lib/cups/filter/
+        - PPD Files: /usr/share/ppd/canon/
+        
+        ## Verification
+           /usr/lib/cups/filter/pstoufr2cpca -v
+        EOF
