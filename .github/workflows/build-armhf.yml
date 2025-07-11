@@ -2,22 +2,34 @@ name: Build Canon ARMHF Driver
 
 on:
   workflow_dispatch: # 允许手动触发
-  
+  schedule:
+    - cron: '0 0 * * *' # 每天自动构建一次（可选）
+
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: armv7/ubuntu:20.04 # 使用 ARM 架构容器
+      image: arm32v7/ubuntu:20.04 # 修正镜像名称
+      options: --privileged # 添加特权模式以支持容器内服务
     
     steps:
     - name: Checkout Canon source
       uses: actions/checkout@v4
       with:
-        repository: random3231/cndrvcups-lb # 直接指定源仓库
+        repository: random3231/cndrvcups-lb
         path: cndrvcups-lb
     
     - name: Install dependencies
       run: |
+        # 更新并安装基础工具
+        apt-get update
+        apt-get install -y wget gnupg
+        
+        # 添加 CUPS 官方源
+        wget -qO- https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x3e1f8c5ed7deb1a0 | apt-key add -
+        echo "deb http://cups.org/debian stable main" >> /etc/apt/sources.list
+        
+        # 安装编译依赖
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
           build-essential autoconf automake libtool \
@@ -40,7 +52,6 @@ jobs:
         
         # 配置编译选项
         ./configure \
-          --host=arm-linux-gnueabihf \
           --prefix=/usr \
           --libdir=/usr/lib/arm-linux-gnueabihf \
           --enable-progpath=/usr/bin \
@@ -68,28 +79,40 @@ jobs:
         #!/bin/bash
         set -e
         
+        # 检查是否以root运行
+        if [ "$(id -u)" -ne 0 ]; then
+          echo "请使用sudo运行此脚本"
+          exit 1
+        fi
+        
         # 复制文件到系统
         echo "安装驱动文件..."
-        cp -r etc/* /etc/
-        cp -r usr/* /usr/
+        [ -d etc ] && cp -r etc/* /etc/
+        [ -d usr ] && cp -r usr/* /usr/
         
         # 更新库缓存
         echo "更新系统配置..."
         ldconfig
         
         # 重载USB规则
+        echo "配置USB设备权限..."
         udevadm control --reload-rules
         udevadm trigger
         
         # 添加用户到打印组
         echo "配置用户权限..."
-        if ! id -nG "$SUDO_USER" | grep -qw "lpadmin"; then
-          usermod -a -G lpadmin "$SUDO_USER"
+        if [ -n "$SUDO_USER" ]; then
+          if ! id -nG "$SUDO_USER" | grep -qw "lpadmin"; then
+            usermod -a -G lpadmin "$SUDO_USER"
+            echo "已将用户 $SUDO_USER 添加到 lpadmin 组"
+          fi
+        else
+          echo "警告：无法确定当前用户，请手动添加到lpadmin组"
         fi
         
         # 重启打印服务
         echo "重启打印服务..."
-        systemctl restart cups
+        systemctl restart cups || true
         
         echo "========================================"
         echo "佳能驱动安装成功！"
