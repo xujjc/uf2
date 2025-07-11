@@ -1,48 +1,50 @@
 name: Build Canon ARMHF Driver
 
 on:
-  workflow_dispatch: # 允许手动触发
-  schedule:
-    - cron: '0 0 * * *' # 每天自动构建一次（可选）
+  workflow_dispatch:
+  push:
+    branches: [main, master]
 
 jobs:
-  build:
+  cross-compile:
     runs-on: ubuntu-latest
-    container:
-      image: arm32v7/ubuntu:20.04 # 修正镜像名称
-      options: --privileged # 添加特权模式以支持容器内服务
     
     steps:
-    - name: Checkout Canon source
+    - name: Checkout source
       uses: actions/checkout@v4
       with:
         repository: random3231/cndrvcups-lb
         path: cndrvcups-lb
-    
-    - name: Install dependencies
+        
+    - name: Setup cross-compilation environment
       run: |
-        # 更新并安装基础工具
-        apt-get update
-        apt-get install -y wget gnupg
+        # 安装交叉编译工具链
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
         
-        # 添加 CUPS 官方源
-        wget -qO- https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x3e1f8c5ed7deb1a0 | apt-key add -
-        echo "deb http://cups.org/debian stable main" >> /etc/apt/sources.list
+        # 添加多架构支持
+        sudo dpkg --add-architecture armhf
+        sudo apt-get update
         
-        # 安装编译依赖
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          build-essential autoconf automake libtool \
-          libcups2-dev libxml2-dev libglib2.0-dev \
-          libtiff-dev libpng-dev libjpeg-dev \
-          pkg-config cups cups-bsd git
-        
-        # 创建输出目录
-        mkdir -p output
+        # 安装ARMHF依赖库
+        sudo apt-get install -y \
+          libcups2-dev:armhf \
+          libxml2-dev:armhf \
+          libglib2.0-dev:armhf \
+          libtiff-dev:armhf \
+          libpng-dev:armhf \
+          libjpeg-dev:armhf \
+          autoconf automake libtool pkg-config
         
     - name: Configure build
-      working-directory: ./cndrvcups-lb
+      working-directory: cndrvcups-lb
       run: |
+        # 设置交叉编译变量
+        export CC=arm-linux-gnueabihf-gcc
+        export CXX=arm-linux-gnueabihf-g++
+        export AR=arm-linux-gnueabihf-ar
+        export RANLIB=arm-linux-gnueabihf-ranlib
+        
         # 生成配置脚本
         if [ -f autogen.sh ]; then
           ./autogen.sh
@@ -52,18 +54,20 @@ jobs:
         
         # 配置编译选项
         ./configure \
+          --host=arm-linux-gnueabihf \
           --prefix=/usr \
           --libdir=/usr/lib/arm-linux-gnueabihf \
           --enable-progpath=/usr/bin \
           --disable-static
         
     - name: Compile driver
-      working-directory: ./cndrvcups-lb
+      working-directory: cndrvcups-lb
       run: |
         # 并行编译
         make -j$(nproc)
         
-        # 安装到临时目录
+        # 创建安装目录
+        mkdir -p ../output/usr
         make install DESTDIR=$(pwd)/../output
         
     - name: Prepare installation package
