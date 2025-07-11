@@ -1,0 +1,109 @@
+name: Build Canon ARMHF Driver
+
+on:
+  workflow_dispatch: # 允许手动触发
+  
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: armv7/ubuntu:20.04 # 使用 ARM 架构容器
+    
+    steps:
+    - name: Checkout Canon source
+      uses: actions/checkout@v4
+      with:
+        repository: random3231/cndrvcups-lb # 直接指定源仓库
+        path: cndrvcups-lb
+    
+    - name: Install dependencies
+      run: |
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          build-essential autoconf automake libtool \
+          libcups2-dev libxml2-dev libglib2.0-dev \
+          libtiff-dev libpng-dev libjpeg-dev \
+          pkg-config cups cups-bsd git
+        
+        # 创建输出目录
+        mkdir -p output
+        
+    - name: Configure build
+      working-directory: ./cndrvcups-lb
+      run: |
+        # 生成配置脚本
+        if [ -f autogen.sh ]; then
+          ./autogen.sh
+        else
+          autoreconf -vif
+        fi
+        
+        # 配置编译选项
+        ./configure \
+          --host=arm-linux-gnueabihf \
+          --prefix=/usr \
+          --libdir=/usr/lib/arm-linux-gnueabihf \
+          --enable-progpath=/usr/bin \
+          --disable-static
+        
+    - name: Compile driver
+      working-directory: ./cndrvcups-lb
+      run: |
+        # 并行编译
+        make -j$(nproc)
+        
+        # 安装到临时目录
+        make install DESTDIR=$(pwd)/../output
+        
+    - name: Prepare installation package
+      run: |
+        cd output
+        
+        # 添加USB规则
+        mkdir -p etc/udev/rules.d
+        echo 'ATTRS{idVendor}=="04a9", MODE="0666", GROUP="lp"' > etc/udev/rules.d/80-canon.rules
+        
+        # 添加安装脚本
+        cat << 'EOF' > install.sh
+        #!/bin/bash
+        set -e
+        
+        # 复制文件到系统
+        echo "安装驱动文件..."
+        cp -r etc/* /etc/
+        cp -r usr/* /usr/
+        
+        # 更新库缓存
+        echo "更新系统配置..."
+        ldconfig
+        
+        # 重载USB规则
+        udevadm control --reload-rules
+        udevadm trigger
+        
+        # 添加用户到打印组
+        echo "配置用户权限..."
+        if ! id -nG "$SUDO_USER" | grep -qw "lpadmin"; then
+          usermod -a -G lpadmin "$SUDO_USER"
+        fi
+        
+        # 重启打印服务
+        echo "重启打印服务..."
+        systemctl restart cups
+        
+        echo "========================================"
+        echo "佳能驱动安装成功！"
+        echo "请访问 http://localhost:631 添加打印机"
+        echo "========================================"
+        EOF
+        
+        chmod +x install.sh
+        
+        # 创建压缩包
+        tar czvf ../canon-driver-armhf.tar.gz .
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: canon-driver-armhf
+        path: canon-driver-armhf.tar.gz
