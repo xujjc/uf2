@@ -18,53 +18,58 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y \
-          build-essential \
-          autoconf \
-          libtool \
-          pkg-config \
-          libcups2-dev \
-          libusb-1.0-0-dev \
-          libxml2-dev \
-          libjpeg-dev \
-          libtiff-dev \
-          git \
-          cmake \
-          crossbuild-essential-armhf \
-          qemu-user-static
+          build-essential autoconf libtool pkg-config \
+          libcups2-dev libusb-1.0-0-dev libxml2-dev \
+          libjpeg-dev libtiff-dev git cmake \
+          crossbuild-essential-armhf qemu-user-static \
+          binfmt-support  # 新增：支持多架构运行
 
-    - name: Set ARMHF Environment
+    - name: Setup Cross-Compilation
       run: |
+        # 设置更完整的交叉编译环境变量
         echo "CC=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV
         echo "CXX=arm-linux-gnueabihf-g++" >> $GITHUB_ENV
-        echo "CFLAGS=-march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard" >> $GITHUB_ENV
+        echo "CFLAGS=-march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard --sysroot=/usr/arm-linux-gnueabihf" >> $GITHUB_ENV
         echo "CXXFLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "LDFLAGS=--sysroot=/usr/arm-linux-gnueabihf" >> $GITHUB_ENV
+        echo "PKG_CONFIG_PATH=/usr/arm-linux-gnueabihf/lib/pkgconfig" >> $GITHUB_ENV
 
     - name: Build Dependency Library
       run: |
+        # 使用交叉编译工具链构建依赖库
         cd libs/cnacom
         make clean
-        make ARCH=armhf
-        sudo cp libcnacbcom.so /usr/lib/arm-linux-gnueabihf/
+        make ARCH=armhf CC=${{ env.CC }} CXX=${{ env.CXX }} CFLAGS="${{ env.CFLAGS }}"
+        # 创建目标目录并复制（避免使用sudo）
+        mkdir -p $GITHUB_WORKSPACE/sysroot/usr/lib
+        cp libcnacbcom.so $GITHUB_WORKSPACE/sysroot/usr/lib/
 
     - name: Configure Project
       run: |
+        # 添加sysroot配置
         ./autogen.sh
         ./configure \
           --prefix=/usr \
           --host=arm-linux-gnueabihf \
+          --with-sysroot=/usr/arm-linux-gnueabihf \
           CC=${{ env.CC }} \
           CXX=${{ env.CXX }} \
           CFLAGS="${{ env.CFLAGS }}" \
-          CXXFLAGS="${{ env.CXXFLAGS }}"
+          CXXFLAGS="${{ env.CXXFLAGS }}" \
+          LDFLAGS="${{ env.LDFLAGS }}"
 
     - name: Compile Driver
-      run: make -j$(nproc)
+      run: |
+        # 指定库搜索路径
+        export LD_LIBRARY_PATH=$GITHUB_WORKSPACE/sysroot/usr/lib:$LD_LIBRARY_PATH
+        make -j$(nproc)
 
     - name: Package Artifacts
       run: |
         mkdir -p ./artifacts
-        cp -r ./src/*.so ./artifacts/
-        cp ./cndrvcups-lb.ppd ./artifacts/
+        # 确认实际生成的二进制路径
+        find . -name "*.so" -exec cp {} ./artifacts/ \;
+        cp ./cndrvcups-lb.ppd ./artifacts/ || echo "PPD file not found"
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
