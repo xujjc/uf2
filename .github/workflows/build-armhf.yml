@@ -7,7 +7,7 @@ on:
 
 jobs:
   cross-compile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # 使用兼容性更好的 22.04 基础环境
     
     steps:
     - name: Checkout source
@@ -16,35 +16,27 @@ jobs:
         repository: random3231/cndrvcups-lb
         path: cndrvcups-lb
         
-    - name: Setup Debian-based cross-compilation
+    - name: Setup cross-compilation environment
       run: |
-        # 添加 Debian 源作为替代方案
-        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm main" | sudo tee /etc/apt/sources.list
-        echo "deb [arch=amd64] http://deb.debian.org/debian bookworm-updates main" | sudo tee -a /etc/apt/sources.list
-        echo "deb [arch=amd64] http://security.debian.org/debian-security bookworm-security main" | sudo tee -a /etc/apt/sources.list
-        
-        # 添加 ARMHF 架构支持
+        # 添加多架构支持
         sudo dpkg --add-architecture armhf
         
-        # 安装必要的工具
-        sudo apt-get update
-        sudo apt-get install -y apt-transport-https ca-certificates
+        # 添加兼容的 Ubuntu 22.04 源（支持 armhf）
+        echo "deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/jammy.list
+        echo "deb [arch=amd64,armhf] http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/jammy.list
+        echo "deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/jammy.list
+        echo "deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/jammy.list
         
-        # 添加 Debian 的 GPG 密钥
-        sudo apt-get install -y debian-archive-keyring
-        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 0E98404D386FA1D9
-        sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6ED0E7B82643E131
-        
-        # 更新并安装交叉编译工具
+        # 安装基本工具和密钥
         sudo apt-get update
+        sudo apt-get install -y apt-transport-https ca-certificates ubuntu-keyring
+        
+        # 安装交叉编译工具链
         sudo apt-get install -y \
+          crossbuild-essential-armhf \
+          binutils-arm-linux-gnueabihf \
           gcc-arm-linux-gnueabihf \
-          g++-arm-linux-gnueabihf \
-          build-essential \
-          autoconf \
-          automake \
-          libtool \
-          pkg-config
+          g++-arm-linux-gnueabihf
         
         # 安装 ARMHF 依赖库
         sudo apt-get install -y \
@@ -53,7 +45,8 @@ jobs:
           libglib2.0-dev:armhf \
           libtiff-dev:armhf \
           libpng-dev:armhf \
-          libjpeg-dev:armhf
+          libjpeg-dev:armhf \
+          libusb-1.0-0-dev:armhf
         
     - name: Configure build
       working-directory: cndrvcups-lb
@@ -66,10 +59,10 @@ jobs:
         CXXFLAGS: "-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard"
         LDFLAGS: "-Wl,--no-as-needed"
       run: |
-        # 生成配置脚本
+        # 自动生成配置脚本
         if [ -f autogen.sh ]; then
-          ./autogen.sh
-        else
+          NOCONFIGURE=1 ./autogen.sh
+        elif [ -f configure.ac ]; then
           autoreconf -vif
         fi
         
@@ -79,79 +72,61 @@ jobs:
           --prefix=/usr \
           --libdir=/usr/lib/arm-linux-gnueabihf \
           --enable-progpath=/usr/bin \
-          --disable-static
+          --disable-static \
+          --enable-shared
         
     - name: Compile driver
       working-directory: cndrvcups-lb
       run: |
-        # 并行编译
-        make -j$(nproc)
+        # 并行编译并捕获错误
+        make -j$(($(nproc) + 1)) || make  # 回退到单线程编译
         
-        # 创建安装目录
-        mkdir -p ../output/usr
-        make install DESTDIR=$(pwd)/../output
-        
-    - name: Prepare installation package
-      run: |
-        cd output
-        
-        # 添加USB规则
-        mkdir -p etc/udev/rules.d
-        echo 'ATTRS{idVendor}=="04a9", MODE="0666", GROUP="lp"' > etc/udev/rules.d/80-canon.rules
-        
-        # 添加安装脚本
-        cat << 'EOF' > install.sh
-        #!/bin/bash
-        set -e
-        
-        # 检查是否以root运行
-        if [ "$(id -u)" -ne 0 ]; then
-          echo "请使用sudo运行此脚本"
+        # 验证编译结果
+        if ! file cndrvcups-* | grep -q "ARM"; then
+          echo "❌ 编译结果不是ARM架构"
           exit 1
         fi
         
-        # 复制文件到系统
-        echo "安装驱动文件..."
-        [ -d etc ] && cp -r etc/* /etc/
-        [ -d usr ] && cp -r usr/* /usr/
+    - name: Package artifacts
+      run: |
+        # 创建标准化输出目录
+        mkdir -p output/{DEBIAN,usr/lib,etc/udev/rules.d}
+        cd cndrvcups-lb
         
-        # 更新库缓存
-        echo "更新系统配置..."
-        ldconfig
+        # 安装到临时目录
+        make install DESTDIR=$(pwd)/../output
         
-        # 重载USB规则
-        echo "配置USB设备权限..."
-        udevadm control --reload-rules
-        udevadm trigger
-        
-        # 添加用户到打印组
-        echo "配置用户权限..."
-        if [ -n "$SUDO_USER" ]; then
-          if ! id -nG "$SUDO_USER" | grep -qw "lpadmin"; then
-            usermod -a -G lpadmin "$SUDO_USER"
-            echo "已将用户 $SUDO_USER 添加到 lpadmin 组"
-          fi
-        else
-          echo "警告：无法确定当前用户，请手动添加到lpadmin组"
-        fi
-        
-        # 重启打印服务
-        echo "重启打印服务..."
-        systemctl restart cups || true
-        
-        echo "========================================"
-        echo "佳能驱动安装成功！"
-        echo "请访问 http://localhost:631 添加打印机"
-        echo "========================================"
+        # 添加控制文件
+        cat << 'EOF' > ../output/DEBIAN/control
+        Package: cndrvcups-lb
+        Version: 1.0-$(date +%Y%m%d)
+        Architecture: armhf
+        Maintainer: GitHub Actions
+        Description: Canon Printer Driver for ARMv7
         EOF
         
-        chmod +x install.sh
+        # 添加udev规则
+        echo 'ATTRS{idVendor}=="04a9", MODE="0666", GROUP="lp"' > ../output/etc/udev/rules.d/80-canon.rules
         
-        # 创建压缩包
-        tar czvf ../canon-driver-armhf.tar.gz .
+        # 创建安装后脚本
+        cat << 'EOF' > ../output/DEBIAN/postinst
+        #!/bin/bash
+        set -e
+        ldconfig
+        udevadm control --reload
+        udevadm trigger
+        systemctl restart cups
+        EOF
+        chmod 755 ../output/DEBIAN/postinst
+        
+        # 构建DEB包
+        cd ../output
+        dpkg-deb --build . ../canon-driver-armhf.deb
         
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: canon-driver-armhf
-        path: canon-driver-armhf.tar.gz
+        path: |
+          canon-driver-armhf.deb
+          output/usr/bin/*
