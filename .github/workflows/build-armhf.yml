@@ -75,7 +75,7 @@ jobs:
           fakeroot dpkg-deb --build . ../cndrvcups-lb-hi3798mv100_armhf.deb
 
       - name: 上传编译结果
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: cndrvcups-lb-mf4452-hi3798mv100
           path: cndrvcups-lb-hi3798mv100_armhf.deb
