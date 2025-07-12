@@ -1,4 +1,4 @@
-name: 为海思Hi3798MV100（ARMHF）编译佳能MF4452驱动
+name: 为海思Hi3798MV100编译佳能MF4452驱动（ARMHF）
 
 on:
   push:
@@ -7,27 +7,46 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04  # 改用支持的版本（替代即将停用的20.04）
     steps:
-      - name: 更新系统与依赖
+      - name: 检查源码
+        uses: actions/checkout@v4
+
+      - name: 启用ARMHF架构支持并更新系统
         run: |
+          # 关键步骤：启用ARMHF跨架构支持
+          sudo dpkg --add-architecture armhf
+          # 更新包列表（包含ARMHF架构的包）
           sudo apt-get update -qq
+
+      - name: 安装编译依赖（含ARMHF库）
+        run: |
           sudo apt-get install -y --no-install-recommends \
+            # 基础编译工具
             build-essential crossbuild-essential-armhf \
-            libcups2-dev:armhf libusb-1.0-0-dev:armhf zlib1g-dev:armhf \
+            # CUPS相关库（ARMHF版本，含运行时和开发库）
+            libcups2:armhf libcups2-dev:armhf \
+            # USB库（ARMHF版本）
+            libusb-1.0-0:armhf libusb-1.0-0-dev:armhf \
+            # 压缩库（ARMHF版本）
+            zlib1g:armhf zlib1g-dev:armhf \
+            # 其他工具
             pkg-config dpkg-dev fakeroot wget tar unzip
 
-      - name: 下载Hi3798MV100专用工具链（arm-hisiv500-linux）
+      - name: 下载海思Hi3798MV100工具链（arm-hisiv500-linux）
         run: |
-          # Hi3798MV100通常使用hisiv500工具链（海思官方适配）
-          # 若链接失效，从海思SDK获取：Hi3798MV100 SDK中的osdrv/toolchain目录
-          wget -O hisiv500-toolchain.tar.gz https://github.com/link?target=https%3A%2F%2Freleases.example.com%2Fhisiv500-toolchain.tar.gz \
+          # 工具链来源：海思Hi3798MV100 SDK中的arm-hisiv500-linux工具链
+          # 若链接失效，从海思官方SDK获取（路径：osdrv/toolchain/）
+          wget -O hisiv500-toolchain.tar.gz https://github.com/link?target=https%3A%2F%2Freleases.example.com%2Farm-hisiv500-linux.tar.gz \
             --user-agent="Mozilla/5.0" --no-check-certificate
-          # 解压到/opt目录（工具链典型路径）
+          # 解压到/opt目录
           sudo mkdir -p /opt/arm-hisiv500-linux
           sudo tar xzf hisiv500-toolchain.tar.gz -C /opt/arm-hisiv500-linux --strip-components=1
           # 验证工具链是否存在
-          ls -ld /opt/arm-hisiv500-linux/bin/arm-hisiv500-linux-gcc
+          if [ ! -f "/opt/arm-hisiv500-linux/bin/arm-hisiv500-linux-gcc" ]; then
+            echo "工具链解压失败，请检查链接"
+            exit 1
+          fi
 
       - name: 配置工具链环境变量
         run: |
@@ -35,51 +54,79 @@ jobs:
           echo 'export CC=arm-hisiv500-linux-gcc' >> $GITHUB_ENV
           echo 'export CXX=arm-hisiv500-linux-g++' >> $GITHUB_ENV
           echo 'export AR=arm-hisiv500-linux-ar' >> $GITHUB_ENV
+          # 指定ARMHF库路径
+          echo 'export LDFLAGS="-L/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/lib"' >> $GITHUB_ENV
 
-      - name: 下载佳能MF4452驱动源码（cndrvcups-lb）
+      - name: 下载佳能cndrvcups-lb驱动源码（支持MF4452）
         run: |
-          # 佳能官方最新稳定版（支持MF4452的UF2协议）
+          # 佳能官方源码包（支持UF2协议，适配MF4452）
           wget -O cndrvcups-lb.tar.gz https://gdlp01.c-wss.com/gds/8/0100010348/01/cndrvcups-lb-2.70-1.tar.gz
           tar xzf cndrvcups-lb.tar.gz
-          mv cndrvcups-lb-2.70-1 cndrvcups-lb-src  # 统一目录名
+          # 重命名目录便于后续操作
+          mv cndrvcups-lb-2.70-1 cndrvcups-lb-src
 
-      - name: 调整源码适配Hi3798MV100（ARMHF）
+      - name: 调整源码适配Hi3798MV100（glibc兼容）
         run: |
           cd cndrvcups-lb-src
-          # 解决可能的glibc版本兼容问题（Hi3798MV100系统可能用较旧glibc）
-          sed -i 's/-std=c++11/-std=c++0x/g' configure  # 降级C++标准
-          # 强制使用交叉编译工具链的库
-          export LDFLAGS="-L/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/lib"
+          # 解决旧glibc版本兼容问题（Hi3798MV100系统可能使用较旧glibc）
+          sed -i 's/-std=c++11/-std=c++0x/g' configure
+          # 确保交叉编译时使用工具链的头文件
+          sed -i "s|^CPPFLAGS=|CPPFLAGS=-I/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/include |g" configure
 
-      - name: 配置编译参数（针对CUPS和Hi3798MV100）
+      - name: 配置编译参数（适配ARMHF和CUPS）
         run: |
           cd cndrvcups-lb-src
           ./configure \
-            --host=arm-hisiv500-linux \  # 匹配工具链前缀
+            --host=arm-hisiv500-linux \
             --prefix=/usr \
-            --libdir=/usr/lib/arm-linux-gnueabihf \  # Hi3798MV100的库路径
+            --libdir=/usr/lib/arm-linux-gnueabihf \  # Hi3798MV100标准库路径
             --sysconfdir=/etc \
             --with-cupsfilterdir=/usr/lib/cups/filter \  # CUPS过滤器路径
             --with-cupsppddir=/usr/share/cups/model \  # PPD文件路径
-            --enable-ufr2 \  # 必须启用，MF4452依赖UF2协议
-            --disable-shared  # 静态编译减少依赖问题
+            --enable-ufr2 \  # 启用MF4452依赖的UF2协议
+            --disable-shared  # 静态编译减少系统依赖
 
       - name: 编译驱动
         run: |
           cd cndrvcups-lb-src
           make -j$(nproc)  # 多线程加速编译
+          # 验证编译产物
+          if [ ! -f "src/cups/filter/cndrvcups-lb" ]; then
+            echo "编译失败，未生成关键文件"
+            exit 1
+          fi
 
       - name: 打包为ARMHF架构Deb包
         run: |
           cd cndrvcups-lb-src
-          fakeroot dpkg-deb --build . ../cndrvcups-lb-hi3798mv100_armhf.deb
+          # 创建Deb包结构并打包
+          mkdir -p debian/DEBIAN
+          # 生成控制文件（指定架构和依赖）
+          cat > debian/DEBIAN/control << EOF
+          Package: cndrvcups-lb-mf4452
+          Version: 2.70-1
+          Architecture: armhf
+          Maintainer: YourName <your@email.com>
+          Depends: libcups2 (>= 2.3), libusb-1.0-0 (>= 1.0.23), zlib1g (>= 1:1.2.11)
+          Description: Canon MF4452 printer driver for Hi3798MV100 (ARMHF)
+          EOF
+          # 复制编译产物到Deb包对应路径
+          mkdir -p debian/usr/lib/cups/filter
+          cp src/cups/filter/cndrvcups-lb debian/usr/lib/cups/filter/
+          mkdir -p debian/usr/share/cups/model
+          cp ppd/*.ppd.gz debian/usr/share/cups/model/
+          # 打包
+          fakeroot dpkg-deb --build debian ../cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb
 
-      - name: 上传编译结果
+      - name: 验证Deb包完整性
+        run: |
+          # 检查Deb包架构
+          dpkg-deb --info cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb | grep "Architecture: armhf"
+          # 检查关键文件是否在包内
+          dpkg-deb --contents cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb | grep "usr/lib/cups/filter/cndrvcups-lb"
+
+      - name: 上传编译结果（供下载）
         uses: actions/upload-artifact@v4
         with:
-          name: cndrvcups-lb-mf4452-hi3798mv100
-          path: cndrvcups-lb-hi3798mv100_armhf.deb
-
-      - name: 验证Deb包架构
-        run: |
-          dpkg-deb --info cndrvcups-lb-hi3798mv100_armhf.deb | grep Architecture  # 应显示armhf
+          name: cndrvcups-lb-hi3798mv100-armhf
+          path: cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb
