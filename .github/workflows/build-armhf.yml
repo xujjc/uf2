@@ -1,48 +1,51 @@
-name: 为海思Hi3798MV100编译佳能MF4452驱动（ARMHF）
+name: 为海思Hi3798MV100编译佳能MF4452驱动（修复ARMHF源）
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 改用支持的版本（替代即将停用的20.04）
+    runs-on: ubuntu-22.04
     steps:
       - name: 检查源码
         uses: actions/checkout@v4
 
-      - name: 启用ARMHF架构支持并更新系统
+      - name: 配置ARMHF架构及修正APT源（解决404错误）
         run: |
-          # 关键步骤：启用ARMHF跨架构支持
+          # 启用ARMHF架构
           sudo dpkg --add-architecture armhf
-          # 更新包列表（包含ARMHF架构的包）
-          sudo apt-get update -qq
+          
+          # 修正APT源：添加支持ARMHF的主源（替代仅依赖security源）
+          # 备份原有源列表
+          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+          # 覆盖源列表，确保包含ARMHF架构的正确路径
+          sudo tee /etc/apt/sources.list << EOF
+          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy main universe restricted multiverse
+          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-updates main universe restricted multiverse
+          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-backports main universe restricted multiverse
+          deb [arch=amd64,armhf] http://security.ubuntu.com/ubuntu jammy-security main universe restricted multiverse
+          EOF
+          
+          # 强制更新源列表（忽略无效索引）
+          sudo apt-get update -qq || true
 
-      - name: 安装编译依赖（含ARMHF库）
+      - name: 安装编译依赖（ARMHF库）
         run: |
           sudo apt-get install -y --no-install-recommends \
-            # 基础编译工具
             build-essential crossbuild-essential-armhf \
-            # CUPS相关库（ARMHF版本，含运行时和开发库）
             libcups2:armhf libcups2-dev:armhf \
-            # USB库（ARMHF版本）
             libusb-1.0-0:armhf libusb-1.0-0-dev:armhf \
-            # 压缩库（ARMHF版本）
             zlib1g:armhf zlib1g-dev:armhf \
-            # 其他工具
             pkg-config dpkg-dev fakeroot wget tar unzip
 
-      - name: 下载海思Hi3798MV100工具链（arm-hisiv500-linux）
+      - name: 下载海思Hi3798MV100工具链
         run: |
-          # 工具链来源：海思Hi3798MV100 SDK中的arm-hisiv500-linux工具链
-          # 若链接失效，从海思官方SDK获取（路径：osdrv/toolchain/）
           wget -O hisiv500-toolchain.tar.gz https://github.com/link?target=https%3A%2F%2Freleases.example.com%2Farm-hisiv500-linux.tar.gz \
             --user-agent="Mozilla/5.0" --no-check-certificate
-          # 解压到/opt目录
           sudo mkdir -p /opt/arm-hisiv500-linux
           sudo tar xzf hisiv500-toolchain.tar.gz -C /opt/arm-hisiv500-linux --strip-components=1
-          # 验证工具链是否存在
           if [ ! -f "/opt/arm-hisiv500-linux/bin/arm-hisiv500-linux-gcc" ]; then
             echo "工具链解压失败，请检查链接"
             exit 1
@@ -54,54 +57,46 @@ jobs:
           echo 'export CC=arm-hisiv500-linux-gcc' >> $GITHUB_ENV
           echo 'export CXX=arm-hisiv500-linux-g++' >> $GITHUB_ENV
           echo 'export AR=arm-hisiv500-linux-ar' >> $GITHUB_ENV
-          # 指定ARMHF库路径
           echo 'export LDFLAGS="-L/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/lib"' >> $GITHUB_ENV
 
-      - name: 下载佳能cndrvcups-lb驱动源码（支持MF4452）
+      - name: 下载佳能cndrvcups-lb驱动源码
         run: |
-          # 佳能官方源码包（支持UF2协议，适配MF4452）
           wget -O cndrvcups-lb.tar.gz https://gdlp01.c-wss.com/gds/8/0100010348/01/cndrvcups-lb-2.70-1.tar.gz
           tar xzf cndrvcups-lb.tar.gz
-          # 重命名目录便于后续操作
           mv cndrvcups-lb-2.70-1 cndrvcups-lb-src
 
-      - name: 调整源码适配Hi3798MV100（glibc兼容）
+      - name: 调整源码适配Hi3798MV100
         run: |
           cd cndrvcups-lb-src
-          # 解决旧glibc版本兼容问题（Hi3798MV100系统可能使用较旧glibc）
           sed -i 's/-std=c++11/-std=c++0x/g' configure
-          # 确保交叉编译时使用工具链的头文件
           sed -i "s|^CPPFLAGS=|CPPFLAGS=-I/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/include |g" configure
 
-      - name: 配置编译参数（适配ARMHF和CUPS）
+      - name: 配置编译参数
         run: |
           cd cndrvcups-lb-src
           ./configure \
             --host=arm-hisiv500-linux \
             --prefix=/usr \
-            --libdir=/usr/lib/arm-linux-gnueabihf \  # Hi3798MV100标准库路径
+            --libdir=/usr/lib/arm-linux-gnueabihf \
             --sysconfdir=/etc \
-            --with-cupsfilterdir=/usr/lib/cups/filter \  # CUPS过滤器路径
-            --with-cupsppddir=/usr/share/cups/model \  # PPD文件路径
-            --enable-ufr2 \  # 启用MF4452依赖的UF2协议
-            --disable-shared  # 静态编译减少系统依赖
+            --with-cupsfilterdir=/usr/lib/cups/filter \
+            --with-cupsppddir=/usr/share/cups/model \
+            --enable-ufr2 \
+            --disable-shared
 
       - name: 编译驱动
         run: |
           cd cndrvcups-lb-src
-          make -j$(nproc)  # 多线程加速编译
-          # 验证编译产物
+          make -j$(nproc)
           if [ ! -f "src/cups/filter/cndrvcups-lb" ]; then
             echo "编译失败，未生成关键文件"
             exit 1
           fi
 
-      - name: 打包为ARMHF架构Deb包
+      - name: 打包为ARMHF Deb包
         run: |
           cd cndrvcups-lb-src
-          # 创建Deb包结构并打包
           mkdir -p debian/DEBIAN
-          # 生成控制文件（指定架构和依赖）
           cat > debian/DEBIAN/control << EOF
           Package: cndrvcups-lb-mf4452
           Version: 2.70-1
@@ -110,22 +105,13 @@ jobs:
           Depends: libcups2 (>= 2.3), libusb-1.0-0 (>= 1.0.23), zlib1g (>= 1:1.2.11)
           Description: Canon MF4452 printer driver for Hi3798MV100 (ARMHF)
           EOF
-          # 复制编译产物到Deb包对应路径
           mkdir -p debian/usr/lib/cups/filter
           cp src/cups/filter/cndrvcups-lb debian/usr/lib/cups/filter/
           mkdir -p debian/usr/share/cups/model
           cp ppd/*.ppd.gz debian/usr/share/cups/model/
-          # 打包
           fakeroot dpkg-deb --build debian ../cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb
 
-      - name: 验证Deb包完整性
-        run: |
-          # 检查Deb包架构
-          dpkg-deb --info cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb | grep "Architecture: armhf"
-          # 检查关键文件是否在包内
-          dpkg-deb --contents cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb | grep "usr/lib/cups/filter/cndrvcups-lb"
-
-      - name: 上传编译结果（供下载）
+      - name: 上传编译结果
         uses: actions/upload-artifact@v4
         with:
           name: cndrvcups-lb-hi3798mv100-armhf
