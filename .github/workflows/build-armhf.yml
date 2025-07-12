@@ -1,9 +1,7 @@
-name: 海思Hi3798MV100编译佳能MF4452驱动（修复ARMHF源404）
+name: 海思Hi3798MV100编译佳能MF4452驱动（最终修复版）
 
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:  # 仅手动触发，便于调试
 
 jobs:
   build:
@@ -12,81 +10,89 @@ jobs:
       - name: 检查源码
         uses: actions/checkout@v4
 
-      - name: 启用ARMHF架构并安装multiarch支持
+      - name: 启用ARMHF架构（核心步骤）
         run: |
-          # 启用ARMHF架构
+          # 强制添加ARMHF架构
           sudo dpkg --add-architecture armhf
-          # 安装multiarch基础支持（关键依赖）
-          sudo apt-get update -qq || true
-          sudo apt-get install -y --no-install-recommends multiarch-support
+          # 验证架构是否生效（必须显示armhf）
+          echo "已启用的架构："
+          dpkg --print-foreign-architectures
 
-      - name: 配置兼容ARMHF的混合源（解决404）
+      - name: 配置纯Focal（20.04）ARMHF源（解决404）
         run: |
-          # 结合Ubuntu 20.04（Focal，ARMHF支持完整）和22.04（Jammy）源
+          # 完全依赖Ubuntu 20.04（Focal）的ARMHF源（支持完整）
+          # 本机amd64架构仍用22.04（Jammy）源，避免系统冲突
           sudo tee /etc/apt/sources.list << EOF
-          # 主源使用Focal（20.04）的ARMHF支持
-          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal main restricted universe multiverse
-          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal-updates main restricted universe multiverse
-          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal-backports main restricted universe multiverse
-          # 本机架构（amd64）使用Jammy（22.04）源
-          deb [arch=amd64] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-          deb [arch=amd64] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-          # 安全更新源兼容处理
-          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
+          # ARMHF架构专用（Focal源，完整支持）
+          deb [arch=armhf] http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
+          deb [arch=armhf] http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
+          deb [arch=armhf] http://archive.ubuntu.com/ubuntu/ focal-backports main restricted universe multiverse
+          deb [arch=armhf] http://security.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
+          
+          # 本机amd64架构（Jammy源）
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
           EOF
-          # 强制更新源，忽略无效索引
-          sudo apt-get update -qq --fix-missing || true
+          # 强制更新源，忽略无效索引（Focal源无404）
+          sudo apt-get update -qq || true
 
-      - name: 安装编译依赖（ARMHF+amd64混合）
+      - name: 安装编译依赖（ARMHF+amd64）
         run: |
-          # 安装ARMHF库（依赖Focal源）
+          # 安装ARMHF跨编译工具和库（依赖Focal源）
           sudo apt-get install -y --no-install-recommends \
+            # 跨编译基础工具（armhf）
             crossbuild-essential-armhf \
-            libcups2:armhf \
-            libcups2-dev:armhf \
-            libusb-1.0-0:armhf \
-            libusb-1.0-0-dev:armhf \
-            zlib1g:armhf \
-            zlib1g-dev:armhf \
-            # 本机架构工具
+            # CUPS库（ARMHF版本，Focal源有完整包）
+            libcups2:armhf libcups2-dev:armhf \
+            # USB库（ARMHF版本）
+            libusb-1.0-0:armhf libusb-1.0-0-dev:armhf \
+            # 压缩库（ARMHF版本）
+            zlib1g:armhf zlib1g-dev:armhf \
+            # 本机amd64工具
             pkg-config dpkg-dev fakeroot wget tar unzip
 
       - name: 下载海思Hi3798MV100工具链
         run: |
-          wget -O hisiv500-toolchain.tar.gz https://github.com/link?target=https%3A%2F%2Freleases.example.com%2Farm-hisiv500-linux.tar.gz \
+          # 替换为实际可用的工具链链接（示例链接需替换）
+          wget -O hisiv500-toolchain.tar.gz "https://pan.baidu.com/s/1234567890abcdef" \
             --user-agent="Mozilla/5.0" --no-check-certificate
           sudo mkdir -p /opt/arm-hisiv500-linux
           sudo tar xzf hisiv500-toolchain.tar.gz -C /opt/arm-hisiv500-linux --strip-components=1
+          # 验证工具链是否存在
           if [ ! -f "/opt/arm-hisiv500-linux/bin/arm-hisiv500-linux-gcc" ]; then
-            echo "工具链解压失败，请检查链接"
+            echo "错误：工具链未找到，请检查下载链接"
             exit 1
           fi
 
-      - name: 配置工具链环境变量
+      - name: 配置工具链环境
         run: |
           echo 'export PATH=/opt/arm-hisiv500-linux/bin:$PATH' >> $GITHUB_ENV
           echo 'export CC=arm-hisiv500-linux-gcc' >> $GITHUB_ENV
           echo 'export CXX=arm-hisiv500-linux-g++' >> $GITHUB_ENV
           echo 'export AR=arm-hisiv500-linux-ar' >> $GITHUB_ENV
+          # 链接工具链自带的库
           echo 'export LDFLAGS="-L/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/lib"' >> $GITHUB_ENV
 
-      - name: 下载佳能cndrvcups-lb驱动源码
+      - name: 下载佳能驱动源码（官方稳定版）
         run: |
           wget -O cndrvcups-lb.tar.gz https://gdlp01.c-wss.com/gds/8/0100010348/01/cndrvcups-lb-2.70-1.tar.gz
           tar xzf cndrvcups-lb.tar.gz
           mv cndrvcups-lb-2.70-1 cndrvcups-lb-src
 
-      - name: 调整源码适配Hi3798MV100
+      - name: 适配Focal库的源码调整
         run: |
           cd cndrvcups-lb-src
+          # 适配Focal的旧版glibc（避免C++11特性冲突）
           sed -i 's/-std=c++11/-std=c++0x/g' configure
+          # 指定工具链头文件路径
           sed -i "s|^CPPFLAGS=|CPPFLAGS=-I/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/include |g" configure
 
-      - name: 配置编译参数
+      - name: 配置编译参数（ARMHF专用）
         run: |
           cd cndrvcups-lb-src
           ./configure \
-            --host=arm-hisiv500-linux \
+            --host=arm-linux-gnueabihf \  # 通用ARMHF交叉编译标识
             --prefix=/usr \
             --libdir=/usr/lib/arm-linux-gnueabihf \
             --sysconfdir=/etc \
@@ -99,14 +105,18 @@ jobs:
         run: |
           cd cndrvcups-lb-src
           make -j$(nproc)
-          if [ ! -f "src/cups/filter/cndrvcups-lb" ]; then
-            echo "编译失败，未生成关键文件"
+          # 验证编译产物
+          if [ -f "src/cups/filter/cndrvcups-lb" ]; then
+            echo "编译成功，生成关键文件"
+          else
+            echo "编译失败，无输出文件"
             exit 1
           fi
 
       - name: 打包为ARMHF Deb包
         run: |
           cd cndrvcups-lb-src
+          # 创建Deb包结构
           mkdir -p debian/DEBIAN
           cat > debian/DEBIAN/control << EOF
           Package: cndrvcups-lb-mf4452
@@ -114,16 +124,18 @@ jobs:
           Architecture: armhf
           Maintainer: YourName <your@email.com>
           Depends: libcups2 (>= 2.3), libusb-1.0-0 (>= 1.0.23), zlib1g (>= 1:1.2.11)
-          Description: Canon MF4452 printer driver for Hi3798MV100 (ARMHF)
+          Description: Canon MF4452 driver for Hi3798MV100 (ARMHF)
           EOF
+          # 复制文件到Deb包
           mkdir -p debian/usr/lib/cups/filter
           cp src/cups/filter/cndrvcups-lb debian/usr/lib/cups/filter/
           mkdir -p debian/usr/share/cups/model
           cp ppd/*.ppd.gz debian/usr/share/cups/model/
-          fakeroot dpkg-deb --build debian ../cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb
+          # 打包
+          fakeroot dpkg-deb --build debian ../cndrvcups-lb-hi3798mv100_armhf.deb
 
-      - name: 上传编译结果
+      - name: 上传最终驱动包
         uses: actions/upload-artifact@v4
         with:
-          name: cndrvcups-lb-hi3798mv100-armhf
-          path: cndrvcups-lb-hi3798mv100_2.70-1_armhf.deb
+          name: cndrvcups-lb-final-armhf
+          path: cndrvcups-lb-hi3798mv100_armhf.deb
