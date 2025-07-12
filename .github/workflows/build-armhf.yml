@@ -1,4 +1,4 @@
-name: 为海思Hi3798MV100编译佳能MF4452驱动（修复ARMHF源）
+name: 海思Hi3798MV100佳能MF4452驱动编译（修复包定位）
 
 on:
   push:
@@ -12,32 +12,41 @@ jobs:
       - name: 检查源码
         uses: actions/checkout@v4
 
-      - name: 配置ARMHF架构及修正APT源（解决404错误）
+      - name: 启用ARMHF架构并验证
         run: |
           # 启用ARMHF架构
           sudo dpkg --add-architecture armhf
-          
-          # 修正APT源：添加支持ARMHF的主源（替代仅依赖security源）
-          # 备份原有源列表
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
-          # 覆盖源列表，确保包含ARMHF架构的正确路径
-          sudo tee /etc/apt/sources.list << EOF
-          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy main universe restricted multiverse
-          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-updates main universe restricted multiverse
-          deb [arch=amd64,armhf] http://archive.ubuntu.com/ubuntu jammy-backports main universe restricted multiverse
-          deb [arch=amd64,armhf] http://security.ubuntu.com/ubuntu jammy-security main universe restricted multiverse
-          EOF
-          
-          # 强制更新源列表（忽略无效索引）
-          sudo apt-get update -qq || true
+          # 验证架构是否添加成功（必须显示armhf）
+          if ! dpkg --print-foreign-architectures | grep -q armhf; then
+            echo "ARMHF架构添加失败"
+            exit 1
+          fi
 
-      - name: 安装编译依赖（ARMHF库）
+      - name: 配置多架构源（国内镜像，解决包定位失败）
         run: |
+          # 使用阿里云镜像（完整支持ARMHF架构）
+          sudo tee /etc/apt/sources.list << EOF
+          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
+          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
+          EOF
+          # 强制更新源缓存（忽略临时错误）
+          sudo apt-get update -qq --fix-missing
+
+      - name: 安装编译依赖（ARMHF专用）
+        run: |
+          # 先安装基础跨编译工具（关键依赖）
           sudo apt-get install -y --no-install-recommends \
-            build-essential crossbuild-essential-armhf \
-            libcups2:armhf libcups2-dev:armhf \
-            libusb-1.0-0:armhf libusb-1.0-0-dev:armhf \
-            zlib1g:armhf zlib1g-dev:armhf \
+            crossbuild-essential-armhf \
+            # 安装ARMHF库（按依赖顺序排列）
+            libusb-1.0-0:armhf \
+            libusb-1.0-0-dev:armhf \
+            zlib1g:armhf \
+            zlib1g-dev:armhf \
+            libcups2:armhf \
+            libcups2-dev:armhf \
+            # 其他工具
             pkg-config dpkg-dev fakeroot wget tar unzip
 
       - name: 下载海思Hi3798MV100工具链
