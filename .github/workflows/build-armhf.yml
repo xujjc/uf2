@@ -1,140 +1,85 @@
-name: Build Canon UFR II ARMHF Driver (Kernel-independent)
+name: 为海思Hi3798MV100（ARMHF）编译佳能MF4452驱动
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
-
-env:
-  ARCH: armhf
-  CROSS_PREFIX: arm-linux-gnueabihf
-  DRIVER_NAME: ufr2-driver
-  DRIVER_URL: https://gdlp01.c-wss.com/gds/7/0100006587/01/linux-ufr2-drv-v590-uken-05.tar.gz
-  DRIVER_SHA256: 12ab34cd56ef78gh90ij12kl34mn56op78qr90st12uv34wx56yz78ab90cd12ef  # 替换实际校验值
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
+    runs-on: ubuntu-20.04
     steps:
-    - name: Setup cross-compiler
-      run: |
-        sudo dpkg --add-architecture ${{ env.ARCH }}
-        sudo apt update
-        sudo apt install -y \
-          crossbuild-essential-${{ env.ARCH }} \
-          gcc-${{ env.CROSS_PREFIX }} \
-          libcups2-dev:${{ env.ARCH }} \
-          libtiff-dev:${{ env.ARCH }} \
-          libjpeg-dev:${{ env.ARCH }} \
-          libpng-dev:${{ env.ARCH }}
-          
-    - name: Download UFR II driver
-      run: |
-        wget ${{ env.DRIVER_URL }} -O ${{ env.DRIVER_NAME }}.tar.gz
-        echo "${{ env.DRIVER_SHA256 }} ${{ env.DRIVER_NAME }}.tar.gz" | sha256sum -c
-        tar xzf ${{ env.DRIVER_NAME }}.tar.gz --strip-components=1
-        
-    - name: Configure cross-compile
-      shell: bash
-      run: |
-        cat << EOF > cross_env.ufr2
-        export ARCH=arm
-        export CC=${{ env.CROSS_PREFIX }}-gcc
-        export CXX=${{ env.CROSS_PREFIX }}-g++
-        export STRIP=${{ env.CROSS_PREFIX }}-strip
-        export CFLAGS="-Os -march=armv7-a -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard"
-        EOF
+      - name: 更新系统与依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential crossbuild-essential-armhf \
+            libcups2-dev:armhf libusb-1.0-0-dev:armhf zlib1g-dev:armhf \
+            pkg-config dpkg-dev fakeroot wget tar unzip
 
-    - name: Build userspace components
-      run: |
-        source cross_env.ufr2
-        
-        # 进入UFR II驱动目录
-        cd UFRII
-        ./configure \
-          --host=${{ env.CROSS_PREFIX }} \
-          --disable-static \
-          --disable-kbuild \
-          --prefix=/usr
-        
-        make -j$(nproc) filter
-        
-        # 提取关键文件
-        mkdir -p ../ufr2-bin
-        cp -v filter/*ufr* ../ufr2-bin/
-        cp -v *.so* ../ufr2-bin/
-        cd ..
+      - name: 下载Hi3798MV100专用工具链（arm-hisiv500-linux）
+        run: |
+          # Hi3798MV100通常使用hisiv500工具链（海思官方适配）
+          # 若链接失效，从海思SDK获取：Hi3798MV100 SDK中的osdrv/toolchain目录
+          wget -O hisiv500-toolchain.tar.gz https://github.com/link?target=https%3A%2F%2Freleases.example.com%2Fhisiv500-toolchain.tar.gz \
+            --user-agent="Mozilla/5.0" --no-check-certificate
+          # 解压到/opt目录（工具链典型路径）
+          sudo mkdir -p /opt/arm-hisiv500-linux
+          sudo tar xzf hisiv500-toolchain.tar.gz -C /opt/arm-hisiv500-linux --strip-components=1
+          # 验证工具链是否存在
+          ls -ld /opt/arm-hisiv500-linux/bin/arm-hisiv500-linux-gcc
 
-    - name: Package universal driver
-      run: |
-        # 创建标准目录结构
-        mkdir -p output/usr/lib/cups/filter
-        mkdir -p output/usr/share/ppd/canon
-        mkdir -p output/usr/share/ufr2
-        
-        # 复制二进制文件和依赖
-        install -m755 ufr2-bin/*ufr* output/usr/lib/cups/filter/
-        install -m644 ufr2-bin/*.so* output/usr/lib/${{ env.CROSS_PREFIX }}/
-        cp -r PPD/* output/usr/share/ppd/canon/
-        cp -r Doc/* output/usr/share/ufr2/
-        
-        # 创建自动安装脚本
-        cat << 'EOF' > output/install-ufr2.sh
-        #!/bin/bash
-        # Install UFR II components
-        sudo cp -r usr /
-        
-        # Register PPD files
-        sudo lpadmin -p Canon_UFRII -m canonufr2.ppd -E -v socket://printer-ip:9100
-        
-        # Set permissions
-        sudo chmod 755 /usr/lib/cups/filter/*
-        sudo chown root:root /usr/lib/cups/filter/*
-        
-        # Reload CUPS
-        sudo systemctl restart cups
-        echo "UFR II driver installed. Printer name: Canon_UFRII"
-        EOF
-        chmod +x output/install-ufr2.sh
-        
-        # 创建压缩包
-        tar czvf ufr2-armhf-universal-$(date +%Y%m%d).tar.gz -C output .
+      - name: 配置工具链环境变量
+        run: |
+          echo 'export PATH=/opt/arm-hisiv500-linux/bin:$PATH' >> $GITHUB_ENV
+          echo 'export CC=arm-hisiv500-linux-gcc' >> $GITHUB_ENV
+          echo 'export CXX=arm-hisiv500-linux-g++' >> $GITHUB_ENV
+          echo 'export AR=arm-hisiv500-linux-ar' >> $GITHUB_ENV
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ufr2-armhf-driver
-        path: ufr2-armhf-universal-*.tar.gz
+      - name: 下载佳能MF4452驱动源码（cndrvcups-lb）
+        run: |
+          # 佳能官方最新稳定版（支持MF4452的UF2协议）
+          wget -O cndrvcups-lb.tar.gz https://gdlp01.c-wss.com/gds/8/0100010348/01/cndrvcups-lb-2.70-1.tar.gz
+          tar xzf cndrvcups-lb.tar.gz
+          mv cndrvcups-lb-2.70-1 cndrvcups-lb-src  # 统一目录名
 
-    - name: Generate README
-      run: |
-        cat << EOF > UFR2-README.md
-        # Canon UFR II ARMHF Universal Driver
-        
-        ## Supported Devices
-        - imageCLASS MF644Cdw
-        - imageCLASS LBP623Cdw
-        - MAXIFY MB2720
-        - 及其他标有"UFR II"的佳能设备
-        
-        ## Installation
-        1. Transfer package to device:
-           scp ufr2-armhf-universal-*.tar.gz pi@raspberrypi:~
-           
-        2. On target device:
-           tar xzf ufr2-armhf-universal-*.tar.gz
-           sudo ./install-ufr2.sh
-           
-        3. Install dependencies:
-           sudo apt install libtiff5 libjpeg62-turbo libpng16-16
-           
-        ## Configuration
-        - Web Interface: http://localhost:631
-        - Driver Location: /usr/lib/cups/filter/
-        - PPD Files: /usr/share/ppd/canon/
-        
-        ## Verification
-           /usr/lib/cups/filter/pstoufr2cpca -v
-        EOF
+      - name: 调整源码适配Hi3798MV100（ARMHF）
+        run: |
+          cd cndrvcups-lb-src
+          # 解决可能的glibc版本兼容问题（Hi3798MV100系统可能用较旧glibc）
+          sed -i 's/-std=c++11/-std=c++0x/g' configure  # 降级C++标准
+          # 强制使用交叉编译工具链的库
+          export LDFLAGS="-L/opt/arm-hisiv500-linux/arm-hisiv500-linux/libc/lib"
+
+      - name: 配置编译参数（针对CUPS和Hi3798MV100）
+        run: |
+          cd cndrvcups-lb-src
+          ./configure \
+            --host=arm-hisiv500-linux \  # 匹配工具链前缀
+            --prefix=/usr \
+            --libdir=/usr/lib/arm-linux-gnueabihf \  # Hi3798MV100的库路径
+            --sysconfdir=/etc \
+            --with-cupsfilterdir=/usr/lib/cups/filter \  # CUPS过滤器路径
+            --with-cupsppddir=/usr/share/cups/model \  # PPD文件路径
+            --enable-ufr2 \  # 必须启用，MF4452依赖UF2协议
+            --disable-shared  # 静态编译减少依赖问题
+
+      - name: 编译驱动
+        run: |
+          cd cndrvcups-lb-src
+          make -j$(nproc)  # 多线程加速编译
+
+      - name: 打包为ARMHF架构Deb包
+        run: |
+          cd cndrvcups-lb-src
+          fakeroot dpkg-deb --build . ../cndrvcups-lb-hi3798mv100_armhf.deb
+
+      - name: 上传编译结果
+        uses: actions/upload-artifact@v3
+        with:
+          name: cndrvcups-lb-mf4452-hi3798mv100
+          path: cndrvcups-lb-hi3798mv100_armhf.deb
+
+      - name: 验证Deb包架构
+        run: |
+          dpkg-deb --info cndrvcups-lb-hi3798mv100_armhf.deb | grep Architecture  # 应显示armhf
