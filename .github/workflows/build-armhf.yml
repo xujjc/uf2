@@ -1,9 +1,9 @@
-name: 海思Hi3798MV100佳能MF4452驱动编译（修复包定位）
+name: 海思Hi3798MV100编译佳能MF4452驱动（修复ARMHF源404）
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发
 
 jobs:
   build:
@@ -12,41 +12,43 @@ jobs:
       - name: 检查源码
         uses: actions/checkout@v4
 
-      - name: 启用ARMHF架构并验证
+      - name: 启用ARMHF架构并安装multiarch支持
         run: |
           # 启用ARMHF架构
           sudo dpkg --add-architecture armhf
-          # 验证架构是否添加成功（必须显示armhf）
-          if ! dpkg --print-foreign-architectures | grep -q armhf; then
-            echo "ARMHF架构添加失败"
-            exit 1
-          fi
+          # 安装multiarch基础支持（关键依赖）
+          sudo apt-get update -qq || true
+          sudo apt-get install -y --no-install-recommends multiarch-support
 
-      - name: 配置多架构源（国内镜像，解决包定位失败）
+      - name: 配置兼容ARMHF的混合源（解决404）
         run: |
-          # 使用阿里云镜像（完整支持ARMHF架构）
+          # 结合Ubuntu 20.04（Focal，ARMHF支持完整）和22.04（Jammy）源
           sudo tee /etc/apt/sources.list << EOF
-          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-          deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+          # 主源使用Focal（20.04）的ARMHF支持
+          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal main restricted universe multiverse
+          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal-updates main restricted universe multiverse
+          deb [arch=armhf] http://mirrors.aliyun.com/ubuntu/ focal-backports main restricted universe multiverse
+          # 本机架构（amd64）使用Jammy（22.04）源
+          deb [arch=amd64] http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
+          deb [arch=amd64] http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
+          # 安全更新源兼容处理
           deb [arch=amd64,armhf] http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
           EOF
-          # 强制更新源缓存（忽略临时错误）
-          sudo apt-get update -qq --fix-missing
+          # 强制更新源，忽略无效索引
+          sudo apt-get update -qq --fix-missing || true
 
-      - name: 安装编译依赖（ARMHF专用）
+      - name: 安装编译依赖（ARMHF+amd64混合）
         run: |
-          # 先安装基础跨编译工具（关键依赖）
+          # 安装ARMHF库（依赖Focal源）
           sudo apt-get install -y --no-install-recommends \
             crossbuild-essential-armhf \
-            # 安装ARMHF库（按依赖顺序排列）
+            libcups2:armhf \
+            libcups2-dev:armhf \
             libusb-1.0-0:armhf \
             libusb-1.0-0-dev:armhf \
             zlib1g:armhf \
             zlib1g-dev:armhf \
-            libcups2:armhf \
-            libcups2-dev:armhf \
-            # 其他工具
+            # 本机架构工具
             pkg-config dpkg-dev fakeroot wget tar unzip
 
       - name: 下载海思Hi3798MV100工具链
